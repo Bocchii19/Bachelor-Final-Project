@@ -1,0 +1,63 @@
+# ============================================================
+# CV Attendance System — Backend Dependencies
+# ============================================================
+# Supports: Jetson (ARM64 + TensorRT), PC (x86 + CUDA), CPU fallback
+
+# --- Web Framework ---
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+
+# --- Database ---
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+alembic==1.14.1
+pgvector==0.3.6
+
+# --- Validation & Settings ---
+pydantic==2.10.4
+pydantic-settings==2.7.1
+
+# --- Auth ---
+passlib[bcrypt]==1.7.4
+python-jose[cryptography]==3.3.0
+bcrypt==4.2.1
+
+# --- Task Queue ---
+celery[redis]==5.4.0
+redis==5.2.1
+
+# --- Computer Vision ---
+opencv-python-headless==4.10.0.84
+numpy>=1.24.0,<2.0.0
+insightface==0.7.3
+# ONNX Runtime — install the correct variant for your hardware:
+#   Jetson:  pip install onnxruntime-gpu  (from NVIDIA's Jetson repo)
+#   RTX GPU: pip install onnxruntime-gpu==1.20.1
+#   CPU:     pip install onnxruntime==1.20.1
+onnxruntime==1.20.1
+
+# --- Clustering ---
+scikit-learn==1.6.1
+
+# --- PTZ Camera ---
+onvif-zeep==0.2.12
+zeep==4.3.1
+
+# --- Excel ---
+openpyxl==3.1.5
+
+# --- Utilities ---
+pillow>=10.0.0
+httpx==0.28.1
+python-dotenv==1.0.1
+
+# --- Liveness Detection ---
+# Silent-Face-Anti-Spoofing (installed from source or as module)
+# torch / torchvision (optional, only if using PyTorch-based liveness)
+# For ONNX-based liveness, no extra dependency needed
+
+# --- Testing ---
+pytest==8.3.4
+pytest-asyncio==0.24.0
+httpx==0.28.1
