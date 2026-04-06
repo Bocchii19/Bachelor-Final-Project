@@ -8,6 +8,7 @@ and RTSP for frame capture. Supports both IP cameras and USB cameras.
 from __future__ import annotations
 
 import logging
+import subprocess
 import time
 from typing import Any, Callable, Dict, List, Optional
 
@@ -47,6 +48,14 @@ class PTZController:
         self._media_service = None
         self._profile_token: Optional[str] = None
         self._cap: Optional[cv2.VideoCapture] = None
+
+        # GStreamer native pipeline state
+        self._gst_pipeline = None
+        self._appsink = None
+        self._latest_frame: Optional[np.ndarray] = None
+        self._frame_width: int = 960
+        self._frame_height: int = 540
+        self._frame_lock = __import__('threading').Lock()
 
     @classmethod
     def get_instance(cls) -> "PTZController":
@@ -91,21 +100,141 @@ class PTZController:
             logger.error("ONVIF connection failed: %s", e)
             raise
 
+    def _on_new_sample(self, appsink):
+        """Callback when a new frame arrives from appsink (same as GUI.py)."""
+        import gi
+        gi.require_version('Gst', '1.0')
+        from gi.repository import Gst
+
+        try:
+            sample = appsink.emit('pull-sample')
+            if sample:
+                buf = sample.get_buffer()
+                caps = sample.get_caps()
+                structure = caps.get_structure(0)
+                width = structure.get_value('width')
+                height = structure.get_value('height')
+
+                success, map_info = buf.map(Gst.MapFlags.READ)
+                if success:
+                    frame_data = np.frombuffer(map_info.data, dtype=np.uint8)
+                    frame_rgb = frame_data.reshape((height, width, 3)).copy()
+                    buf.unmap(map_info)
+
+                    # Convert RGB -> BGR for OpenCV (pipeline outputs RGB like GUI.py)
+                    frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+
+                    with self._frame_lock:
+                        self._latest_frame = frame_bgr
+        except Exception as e:
+            logger.error("Error in on_new_sample: %s", e)
+
+        return Gst.FlowReturn.OK
+
     def _ensure_rtsp(self) -> None:
-        """Initialize RTSP capture if not already done."""
-        if self._cap is not None and self._cap.isOpened():
-            return
+        """Initialize RTSP capture using native GStreamer pipeline for H.265.
+        Uses the same approach as GUI.py: Gst.parse_launch + appsink + callback.
+        """
+        if self._gst_pipeline is not None:
+            return  # Already running
 
         if not self._rtsp_url:
             raise RuntimeError("No RTSP URL configured")
 
-        self._cap = cv2.VideoCapture(self._rtsp_url)
-        if not self._cap.isOpened():
-            raise RuntimeError(f"Could not open RTSP stream: {self._rtsp_url}")
+        import gi
+        gi.require_version('Gst', '1.0')
+        gi.require_version('GLib', '2.0')
+        from gi.repository import Gst, GLib
 
-        # Set buffer size to 1 for low latency
-        self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        logger.info("RTSP stream opened: %s", self._rtsp_url)
+        if not Gst.is_initialized():
+            Gst.init(None)
+
+        # Build pipeline string — GPU accelerated H.265 decoding with NVDEC
+        pipeline_str = (
+            f"rtspsrc location={self._rtsp_url} latency=0 ! "
+            "rtph265depay ! "
+            "h265parse ! "
+            "nvh265dec ! "
+            "cudadownload ! "
+            "videoconvert ! "
+            "videoscale ! "
+            "video/x-raw,width=960,height=540,format=RGB ! "
+            "appsink name=appsink emit-signals=true max-buffers=1 drop=true sync=false"
+        )
+
+        logger.info("Starting native GStreamer pipeline for: %s", self._rtsp_url)
+        try:
+            self._gst_pipeline = Gst.parse_launch(pipeline_str)
+
+            # Connect appsink callback — same as GUI.py
+            self._appsink = self._gst_pipeline.get_by_name('appsink')
+            if self._appsink:
+                self._appsink.connect('new-sample', self._on_new_sample)
+            else:
+                raise RuntimeError("Could not find appsink in pipeline")
+
+            # Setup bus for error handling
+            bus = self._gst_pipeline.get_bus()
+            bus.add_signal_watch()
+            bus.connect("message::error", self._on_gst_error)
+
+            # Start GLib MainLoop in a background thread for signal delivery
+            if not hasattr(self, '_glib_loop') or self._glib_loop is None:
+                self._glib_loop = GLib.MainLoop()
+                import threading
+                self._glib_thread = threading.Thread(
+                    target=self._glib_loop.run, daemon=True
+                )
+                self._glib_thread.start()
+
+            # Start pipeline
+            ret = self._gst_pipeline.set_state(Gst.State.PLAYING)
+            if ret == Gst.StateChangeReturn.FAILURE:
+                self._gst_pipeline = None
+                raise RuntimeError("Failed to start GStreamer pipeline")
+
+            logger.info("GStreamer pipeline started successfully")
+        except Exception as e:
+            logger.error("GStreamer pipeline creation failed: %s", e)
+            self._gst_pipeline = None
+            raise
+
+    def _on_gst_error(self, bus, msg):
+        """Handle GStreamer bus error messages."""
+        err, debug = msg.parse_error()
+        logger.error("GStreamer bus error: %s | %s", err.message, debug)
+
+    def _kill_gst(self) -> None:
+        """Stop the GStreamer pipeline if running."""
+        if self._gst_pipeline is not None:
+            try:
+                import gi
+                gi.require_version('Gst', '1.0')
+                from gi.repository import Gst
+                self._gst_pipeline.set_state(Gst.State.NULL)
+            except Exception:
+                pass
+            self._gst_pipeline = None
+            self._appsink = None
+
+        # Stop GLib MainLoop
+        if hasattr(self, '_glib_loop') and self._glib_loop is not None:
+            self._glib_loop.quit()
+            self._glib_loop = None
+
+    def capture_frame(self) -> np.ndarray:
+        """Return the latest frame from the GStreamer callback buffer."""
+        self._ensure_rtsp()
+
+        # Wait briefly for the first frame if pipeline just started
+        import time
+        for _ in range(50):  # Wait up to 5 seconds (50 × 0.1s)
+            with self._frame_lock:
+                if self._latest_frame is not None:
+                    return self._latest_frame.copy()
+            time.sleep(0.1)
+
+        raise RuntimeError("No frame available from GStreamer pipeline (timeout)")
 
     def move_to_preset(self, preset_token: str) -> None:
         """Move camera to a named preset position."""
@@ -123,36 +252,76 @@ class PTZController:
             logger.error("Move to preset failed: %s", e)
             raise
 
-    def capture_frame(self) -> np.ndarray:
-        """Capture a single frame from the RTSP stream."""
-        self._ensure_rtsp()
-        assert self._cap is not None
+    def continuous_move(
+        self,
+        pan_speed: float = 0.0,
+        tilt_speed: float = 0.0,
+        zoom_speed: float = 0.0,
+    ) -> None:
+        """Start continuous PTZ movement.
 
-        # Flush buffer to get latest frame
-        for _ in range(3):
-            self._cap.grab()
+        Args:
+            pan_speed: -1.0 (left) to 1.0 (right)
+            tilt_speed: -1.0 (down) to 1.0 (up)
+            zoom_speed: -1.0 (wide) to 1.0 (tele)
+        """
+        self._ensure_onvif()
+        assert self._ptz_service is not None
+        assert self._profile_token is not None
 
-        ret, frame = self._cap.read()
-        if not ret or frame is None:
-            raise RuntimeError("Failed to capture frame from RTSP stream")
+        try:
+            request = self._ptz_service.create_type('ContinuousMove')
+            request.ProfileToken = self._profile_token
+            request.Velocity = {
+                "PanTilt": {"x": pan_speed, "y": tilt_speed},
+                "Zoom": {"x": zoom_speed},
+            }
+            self._ptz_service.ContinuousMove(request)
+            logger.info(
+                "ContinuousMove: pan=%.2f tilt=%.2f zoom=%.2f",
+                pan_speed, tilt_speed, zoom_speed,
+            )
+        except Exception as e:
+            logger.error("ContinuousMove failed: %s", e)
+            raise
 
-        return frame
+    def stop_move(self, pan_tilt: bool = True, zoom: bool = True) -> None:
+        """Stop all PTZ movement."""
+        self._ensure_onvif()
+        assert self._ptz_service is not None
+        assert self._profile_token is not None
+
+        try:
+            self._ptz_service.Stop({
+                "ProfileToken": self._profile_token,
+                "PanTilt": pan_tilt,
+                "Zoom": zoom,
+            })
+            logger.info("PTZ Stop")
+        except Exception as e:
+            logger.error("PTZ Stop failed: %s", e)
+            raise
 
     def get_presets(self) -> List[Dict[str, Any]]:
-        """Get list of configured presets."""
+        """Get list of user-created presets (filtered, max 8)."""
         self._ensure_onvif()
         assert self._ptz_service is not None
         assert self._profile_token is not None
 
         try:
             presets = self._ptz_service.GetPresets({"ProfileToken": self._profile_token})
-            return [
-                {
-                    "token": str(p.token),
-                    "name": getattr(p, "Name", f"Preset {p.token}"),
-                }
-                for p in presets
-            ]
+            import re
+            result = []
+            for p in presets:
+                name = getattr(p, "Name", None) or ""
+                token = str(p.token)
+                # Skip default/empty presets — only keep user-named ones
+                if not name or re.match(r'^(preset\s*\d+|Preset\s*\d+|\d+)$', name.strip()):
+                    continue
+                result.append({"token": token, "name": name})
+                if len(result) >= 8:
+                    break
+            return result
         except Exception as e:
             logger.error("Get presets failed: %s", e)
             return []
@@ -244,9 +413,75 @@ class PTZController:
 
     def release(self) -> None:
         """Release resources."""
+        self._kill_gst()
         if self._cap is not None:
             self._cap.release()
             self._cap = None
         self._onvif_camera = None
         self._ptz_service = None
         logger.info("PTZ controller released")
+
+
+class CameraManager:
+    """
+    Manages multiple PTZController instances, keyed by camera UUID string.
+    Each camera gets its own GStreamer pipeline and optional ONVIF connection.
+    """
+
+    _cameras: Dict[str, PTZController] = {}
+    _lock = __import__("threading").Lock()
+
+    @classmethod
+    def add_camera(
+        cls,
+        camera_id: str,
+        rtsp_url: str,
+        onvif_host: Optional[str] = None,
+        onvif_port: Optional[int] = None,
+        onvif_user: Optional[str] = None,
+        onvif_password: Optional[str] = None,
+    ) -> PTZController:
+        """Create and register a PTZController for the given camera."""
+        with cls._lock:
+            if camera_id in cls._cameras:
+                return cls._cameras[camera_id]
+
+            ctrl = PTZController(
+                host=onvif_host or "",
+                port=onvif_port or 80,
+                user=onvif_user or "",
+                password=onvif_password or "",
+                rtsp_url=rtsp_url,
+            )
+            cls._cameras[camera_id] = ctrl
+            logger.info("CameraManager: added camera %s (rtsp=%s)", camera_id, rtsp_url)
+            return ctrl
+
+    @classmethod
+    def get_camera(cls, camera_id: str) -> Optional[PTZController]:
+        """Return the PTZController for *camera_id*, or None."""
+        return cls._cameras.get(camera_id)
+
+    @classmethod
+    def remove_camera(cls, camera_id: str) -> None:
+        """Stop and remove a camera controller."""
+        with cls._lock:
+            ctrl = cls._cameras.pop(camera_id, None)
+            if ctrl is not None:
+                ctrl.release()
+                logger.info("CameraManager: removed camera %s", camera_id)
+
+    @classmethod
+    def list_camera_ids(cls) -> List[str]:
+        """Return list of registered camera IDs."""
+        return list(cls._cameras.keys())
+
+    @classmethod
+    def remove_all(cls) -> None:
+        """Stop and remove every camera."""
+        with cls._lock:
+            for cid in list(cls._cameras):
+                ctrl = cls._cameras.pop(cid, None)
+                if ctrl:
+                    ctrl.release()
+            logger.info("CameraManager: removed all cameras")

@@ -14,6 +14,7 @@ import AttendanceSheet from "./pages/AttendanceSheet";
 import Sessions from "./pages/Sessions";
 import UnknownQueue from "./pages/UnknownQueue";
 import Students from "./pages/Students";
+import CameraView from "./pages/CameraView";
 
 // Auth guard
 const RequireAuth: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -68,6 +69,7 @@ const App: React.FC = () => {
             <Route path="sessions" element={<Sessions />} />
             <Route path="unknown-faces" element={<UnknownQueue />} />
             <Route path="students" element={<Students />} />
+            <Route path="ptz" element={<CameraView />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

@@ -24,8 +24,8 @@ from app.models import *  # noqa: F401, F403
 config = context.config
 settings = get_settings()
 
-# Override sqlalchemy.url with our settings
-config.set_main_option("sqlalchemy.url", settings.database_url_sync)
+# Override sqlalchemy.url with our settings (use async URL for async engine)
+config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

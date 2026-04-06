@@ -93,11 +93,11 @@ class FaceRecognizer:
                     fe.student_id,
                     s.student_code,
                     s.full_name,
-                    1 - (fe.embedding <=> :query_vec::vector) AS score
+                    1 - (fe.embedding <=> CAST(:query_vec AS vector)) AS score
                 FROM face_embeddings fe
                 JOIN students s ON s.id = fe.student_id
                 WHERE s.class_id = :class_id
-                ORDER BY fe.embedding <=> :query_vec::vector
+                ORDER BY fe.embedding <=> CAST(:query_vec AS vector)
                 LIMIT :top_k
             """)
             result = await db.execute(
@@ -110,10 +110,10 @@ class FaceRecognizer:
                     fe.student_id,
                     s.student_code,
                     s.full_name,
-                    1 - (fe.embedding <=> :query_vec::vector) AS score
+                    1 - (fe.embedding <=> CAST(:query_vec AS vector)) AS score
                 FROM face_embeddings fe
                 JOIN students s ON s.id = fe.student_id
-                ORDER BY fe.embedding <=> :query_vec::vector
+                ORDER BY fe.embedding <=> CAST(:query_vec AS vector)
                 LIMIT :top_k
             """)
             result = await db.execute(

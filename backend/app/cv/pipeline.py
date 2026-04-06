@@ -113,6 +113,7 @@ class CVPipeline:
         db: AsyncSession,
         zone_id: Optional[str] = None,
         class_id: Optional[uuid.UUID] = None,
+        skip_dedup: bool = False,
     ) -> ProcessResult:
         """
         Full pipeline: detect → liveness → recognize → classify.
@@ -131,7 +132,7 @@ class CVPipeline:
         result = ProcessResult()
 
         # Frame deduplication
-        if self._is_duplicate_frame(frame):
+        if not skip_dedup and self._is_duplicate_frame(frame):
             logger.debug("Skipping duplicate frame")
             return result
 
