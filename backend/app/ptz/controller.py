@@ -46,15 +46,17 @@ class PTZController:
         self._onvif_camera = None
         self._ptz_service = None
         self._media_service = None
+        self._imaging_service = None
         self._profile_token: Optional[str] = None
+        self._vs_token: Optional[str] = None      # VideoSource token for imaging
         self._cap: Optional[cv2.VideoCapture] = None
 
         # GStreamer native pipeline state
         self._gst_pipeline = None
         self._appsink = None
         self._latest_frame: Optional[np.ndarray] = None
-        self._frame_width: int = 960
-        self._frame_height: int = 540
+        self._frame_width: int = 1920
+        self._frame_height: int = 1080
         self._frame_lock = __import__('threading').Lock()
 
     @classmethod
@@ -87,21 +89,35 @@ class PTZController:
             profiles = self._media_service.GetProfiles()
             if profiles:
                 self._profile_token = profiles[0].token
+                # VideoSource token for imaging service
+                vsc = getattr(profiles[0], 'VideoSourceConfiguration', None)
+                if vsc:
+                    self._vs_token = vsc.SourceToken
                 logger.info(
-                    "ONVIF connected to %s:%s, profile=%s",
+                    "ONVIF connected to %s:%s, profile=%s, vs=%s",
                     self._host,
                     self._port,
                     self._profile_token,
+                    self._vs_token,
                 )
             else:
                 logger.warning("No media profiles found on camera")
+
+            # Imaging service for focus control
+            try:
+                self._imaging_service = self._onvif_camera.create_imaging_service()
+                logger.info("ONVIF imaging service initialized")
+            except Exception as img_e:
+                logger.warning("Imaging service not available: %s", img_e)
 
         except Exception as e:
             logger.error("ONVIF connection failed: %s", e)
             raise
 
     def _on_new_sample(self, appsink):
-        """Callback when a new frame arrives from appsink (same as GUI.py)."""
+        """Callback when a new frame arrives from appsink.
+        Pipeline outputs BGR directly — no cvtColor needed.
+        """
         import gi
         gi.require_version('Gst', '1.0')
         from gi.repository import Gst
@@ -118,12 +134,10 @@ class PTZController:
                 success, map_info = buf.map(Gst.MapFlags.READ)
                 if success:
                     frame_data = np.frombuffer(map_info.data, dtype=np.uint8)
-                    frame_rgb = frame_data.reshape((height, width, 3)).copy()
+                    frame_bgr = frame_data.reshape((height, width, 3)).copy()
                     buf.unmap(map_info)
 
-                    # Convert RGB -> BGR for OpenCV (pipeline outputs RGB like GUI.py)
-                    frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-
+                    # Pipeline already outputs BGR — store directly
                     with self._frame_lock:
                         self._latest_frame = frame_bgr
         except Exception as e:
@@ -149,16 +163,18 @@ class PTZController:
         if not Gst.is_initialized():
             Gst.init(None)
 
-        # Build pipeline string — GPU accelerated H.265 decoding with NVDEC
+        # Build pipeline string — GPU accelerated H.265 decoding (NVDEC)
+        # Scale to 1920×1080 Full HD, output BGR for OpenCV
         pipeline_str = (
-            f"rtspsrc location={self._rtsp_url} latency=0 ! "
+            f"rtspsrc location={self._rtsp_url} latency=0 "
+            "protocols=tcp drop-on-latency=true ! "
             "rtph265depay ! "
             "h265parse ! "
             "nvh265dec ! "
             "cudadownload ! "
             "videoconvert ! "
             "videoscale ! "
-            "video/x-raw,width=960,height=540,format=RGB ! "
+            "video/x-raw,width=1920,height=1080,format=BGR ! "
             "appsink name=appsink emit-signals=true max-buffers=1 drop=true sync=false"
         )
 
@@ -231,10 +247,20 @@ class PTZController:
         for _ in range(50):  # Wait up to 5 seconds (50 × 0.1s)
             with self._frame_lock:
                 if self._latest_frame is not None:
-                    return self._latest_frame.copy()
+                    return self._latest_frame
             time.sleep(0.1)
 
         raise RuntimeError("No frame available from GStreamer pipeline (timeout)")
+
+    def capture_frame_jpeg(self, quality: int = 60) -> bytes | None:
+        """Return latest frame as JPEG bytes — fast path for WebSocket streaming."""
+        self._ensure_rtsp()
+        with self._frame_lock:
+            frame = self._latest_frame
+        if frame is None:
+            return None
+        _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        return buf.tobytes()
 
     def move_to_preset(self, preset_token: str) -> None:
         """Move camera to a named preset position."""
@@ -325,6 +351,104 @@ class PTZController:
         except Exception as e:
             logger.error("Get presets failed: %s", e)
             return []
+
+    def get_all_presets(self) -> List[Dict[str, Any]]:
+        """Get ALL presets from camera (no filter). Used by auto-scan."""
+        self._ensure_onvif()
+        assert self._ptz_service is not None
+        assert self._profile_token is not None
+
+        try:
+            presets = self._ptz_service.GetPresets({"ProfileToken": self._profile_token})
+            result = []
+            for p in presets:
+                name = getattr(p, "Name", None) or ""
+                token = str(p.token)
+                if name:
+                    result.append({"token": token, "name": name})
+            return result
+        except Exception as e:
+            logger.error("Get all presets failed: %s", e)
+            return []
+
+    # ------------------------------------------------------------------
+    # Focus control (ONVIF Imaging Service)
+    # ------------------------------------------------------------------
+
+    def focus_move(self, speed: float) -> None:
+        """
+        Continuous focus move.
+        speed > 0 = focus far (out), speed < 0 = focus near (in).
+        Call focus_stop() to stop.
+        """
+        self._ensure_onvif()
+        if not self._imaging_service or not self._vs_token:
+            raise RuntimeError("Imaging service not available")
+
+        try:
+            self._imaging_service.Move({
+                "VideoSourceToken": self._vs_token,
+                "Focus": {
+                    "Continuous": {"Speed": speed}
+                },
+            })
+            logger.info("Focus move speed=%.2f", speed)
+        except Exception as e:
+            logger.error("Focus move failed: %s", e)
+            raise
+
+    def focus_stop(self) -> None:
+        """Stop continuous focus movement."""
+        self._ensure_onvif()
+        if not self._imaging_service or not self._vs_token:
+            raise RuntimeError("Imaging service not available")
+
+        try:
+            self._imaging_service.Stop({"VideoSourceToken": self._vs_token})
+            logger.info("Focus stop")
+        except Exception as e:
+            logger.error("Focus stop failed: %s", e)
+            raise
+
+    def focus_auto(self) -> None:
+        """Set focus to auto mode."""
+        self._ensure_onvif()
+        if not self._imaging_service or not self._vs_token:
+            raise RuntimeError("Imaging service not available")
+
+        try:
+            settings = self._imaging_service.GetImagingSettings(
+                {"VideoSourceToken": self._vs_token}
+            )
+            settings.Focus.AutoFocusMode = "AUTO"
+            self._imaging_service.SetImagingSettings({
+                "VideoSourceToken": self._vs_token,
+                "ImagingSettings": settings,
+            })
+            logger.info("Focus set to AUTO")
+        except Exception as e:
+            logger.error("Focus auto failed: %s", e)
+            raise
+
+    def focus_manual(self) -> None:
+        """Set focus to manual mode."""
+        self._ensure_onvif()
+        if not self._imaging_service or not self._vs_token:
+            raise RuntimeError("Imaging service not available")
+
+        try:
+            settings = self._imaging_service.GetImagingSettings(
+                {"VideoSourceToken": self._vs_token}
+            )
+            settings.Focus.AutoFocusMode = "MANUAL"
+            self._imaging_service.SetImagingSettings({
+                "VideoSourceToken": self._vs_token,
+                "ImagingSettings": settings,
+            })
+            logger.info("Focus set to MANUAL")
+        except Exception as e:
+            logger.error("Focus manual failed: %s", e)
+            raise
 
     def get_status(self) -> Dict[str, float]:
         """Get current PTZ position."""

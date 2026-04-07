@@ -42,7 +42,9 @@ import {
   EditOutlined,
   AppstoreOutlined,
   CloseOutlined,
+  RadarChartOutlined,
 } from "@ant-design/icons";
+import { Progress, Select } from "antd";
 import api from "../api/client";
 import AddCameraModal from "../components/AddCameraModal";
 
@@ -65,6 +67,26 @@ interface CameraInfo {
 interface PresetInfo {
   token: string;
   name: string;
+}
+
+interface ScanStatus {
+  state: "idle" | "scanning" | "done";
+  current_zone: string;
+  current_sweep: number;
+  total_sweeps: number;
+  zones_total: number;
+  zones_done: number;
+  frames_processed: number;
+  recognized_count: number;
+  coverage_pct: number;
+  recognized: Array<{
+    student_code: string;
+    full_name: string;
+    score: number;
+    time: string;
+    zone: string;
+  }>;
+  error: string | null;
 }
 
 interface AttendanceEntry {
@@ -98,6 +120,7 @@ const CameraTile: React.FC<{
       wsRef.current.close();
     }
     const ws = new WebSocket(`${WS_BASE}/${camera.id}/ws`);
+    ws.binaryType = "blob"; // Receive binary JPEG frames
     wsRef.current = ws;
 
     ws.onopen = () => setConnected(true);
@@ -107,15 +130,26 @@ const CameraTile: React.FC<{
       if (!canvas) return;
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
-      const img = new Image();
-      img.onload = () => {
-        if (canvas.width !== img.width || canvas.height !== img.height) {
-          canvas.width = img.width;
-          canvas.height = img.height;
+
+      // Handle both binary (new) and text/base64 (legacy) frames
+      const blob =
+        event.data instanceof Blob
+          ? event.data
+          : new Blob(
+              [
+                Uint8Array.from(atob(event.data), (c) => c.charCodeAt(0)),
+              ],
+              { type: "image/jpeg" }
+            );
+
+      createImageBitmap(blob).then((bmp) => {
+        if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
+          canvas.width = bmp.width;
+          canvas.height = bmp.height;
         }
-        ctx.drawImage(img, 0, 0);
-      };
-      img.src = "data:image/jpeg;base64," + event.data;
+        ctx.drawImage(bmp, 0, 0);
+        bmp.close();
+      });
     };
 
     ws.onclose = () => {
@@ -236,8 +270,8 @@ const CameraTile: React.FC<{
       {/* Canvas */}
       <canvas
         ref={canvasRef}
-        width={960}
-        height={540}
+        width={1920}
+        height={1080}
         style={{
           width: "100%",
           height: "100%",
@@ -352,6 +386,12 @@ const CameraView: React.FC = () => {
     null
   );
 
+  // Auto-scan
+  const [scanStatus, setScanStatus] = useState<ScanStatus | null>(null);
+  const scanPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [allPresets, setAllPresets] = useState<PresetInfo[]>([]);
+  const [scanPresetTokens, setScanPresetTokens] = useState<string[]>([]);
+
   /* -- Data fetching -- */
 
   const fetchCameras = async () => {
@@ -381,9 +421,18 @@ const CameraView: React.FC = () => {
     }
   };
 
+  const fetchAllPresets = async () => {
+    try {
+      const res = await api.get("/ptz/all-presets");
+      setAllPresets(res.data);
+    } catch {
+      setAllPresets([]);
+    }
+  };
+
   // Initial load
   useEffect(() => {
-    Promise.all([fetchCameras(), fetchEnrollStats(), fetchPresets()]).finally(
+    Promise.all([fetchCameras(), fetchEnrollStats(), fetchPresets(), fetchAllPresets()]).finally(
       () => setLoading(false)
     );
   }, []);
@@ -536,6 +585,78 @@ const CameraView: React.FC = () => {
       /* ignore */
     }
   };
+
+  /* -- Auto-Scan -- */
+
+  const handleStartAutoScan = async () => {
+    try {
+      await api.post("/ptz/start-auto-scan", {
+        sweeps: 2,
+        dwell_seconds: 4.0,
+        frames_per_zone: 6,
+        preset_tokens: scanPresetTokens.length > 0 ? scanPresetTokens : undefined,
+      });
+      message.success("Bắt đầu quét tự động");
+      // Poll scan status
+      scanPollRef.current = setInterval(async () => {
+        try {
+          const res = await api.get("/ptz/auto-scan-status");
+          setScanStatus(res.data);
+          if (res.data.state === "done" || res.data.state === "idle") {
+            if (scanPollRef.current) clearInterval(scanPollRef.current);
+            if (res.data.state === "done") {
+              message.success(
+                `Quét xong: ${res.data.recognized_count} SV (${res.data.coverage_pct}%)`
+              );
+            }
+          }
+        } catch {
+          /* ignore */
+        }
+      }, 2000);
+    } catch {
+      message.error("Lỗi bắt đầu quét tự động");
+    }
+  };
+
+  const handleStopAutoScan = async () => {
+    try {
+      await api.post("/ptz/stop-auto-scan");
+      if (scanPollRef.current) clearInterval(scanPollRef.current);
+      message.info("Đã dừng quét tự động");
+    } catch {
+      /* ignore */
+    }
+  };
+
+  // Cleanup scan poll on unmount
+  useEffect(() => {
+    return () => {
+      if (scanPollRef.current) clearInterval(scanPollRef.current);
+    };
+  }, []);
+
+  // Restore scan state on mount
+  useEffect(() => {
+    const restoreScan = async () => {
+      try {
+        const res = await api.get("/ptz/auto-scan-status");
+        if (res.data.state === "scanning") {
+          setScanStatus(res.data);
+          scanPollRef.current = setInterval(async () => {
+            try {
+              const r = await api.get("/ptz/auto-scan-status");
+              setScanStatus(r.data);
+              if (r.data.state !== "scanning") {
+                if (scanPollRef.current) clearInterval(scanPollRef.current);
+              }
+            } catch { /* ignore */ }
+          }, 2000);
+        }
+      } catch { /* ignore */ }
+    };
+    restoreScan();
+  }, []);
 
   /* -- Render -- */
 
@@ -776,6 +897,50 @@ const CameraView: React.FC = () => {
                   </Button>
                 </div>
 
+                {/* Focus */}
+                <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                  <Button
+                    block
+                    onMouseDown={() => {
+                      api.post("/ptz/focus-in").catch(() => {});
+                    }}
+                    onMouseUp={() => {
+                      api.post("/ptz/focus-stop").catch(() => {});
+                    }}
+                    onMouseLeave={() => {
+                      api.post("/ptz/focus-stop").catch(() => {});
+                    }}
+                  >
+                    🔍 Focus +
+                  </Button>
+                  <Button
+                    block
+                    onMouseDown={() => {
+                      api.post("/ptz/focus-out").catch(() => {});
+                    }}
+                    onMouseUp={() => {
+                      api.post("/ptz/focus-stop").catch(() => {});
+                    }}
+                    onMouseLeave={() => {
+                      api.post("/ptz/focus-stop").catch(() => {});
+                    }}
+                  >
+                    🔍 Focus −
+                  </Button>
+                  <Button
+                    block
+                    onClick={() => {
+                      api
+                        .post("/ptz/focus-auto")
+                        .then(() => message.success("Auto Focus"))
+                        .catch(() => message.error("Focus error"));
+                    }}
+                    style={{ flex: "0 0 auto", minWidth: 70 }}
+                  >
+                    AF
+                  </Button>
+                </div>
+
                 {/* Presets */}
                 {presets.length > 0 && (
                   <div style={{ marginTop: 12 }}>
@@ -863,6 +1028,7 @@ const CameraView: React.FC = () => {
                     icon={<ScanOutlined />}
                     block
                     onClick={handleStartAttendance}
+                    disabled={scanStatus?.state === "scanning"}
                   >
                     Bắt đầu điểm danh
                   </Button>
@@ -912,6 +1078,210 @@ const CameraView: React.FC = () => {
                 )}
               </Space>
             </Card>
+
+            {/* Auto-Scan */}
+            {expandedCamera?.type === "ptz" && (
+              <Card
+                title={
+                  <Space>
+                    <RadarChartOutlined />
+                    Quét tự động
+                    {scanStatus?.state === "scanning" && (
+                      <Badge status="processing" text="Đang quét" />
+                    )}
+                    {scanStatus?.state === "done" && (
+                      <Badge status="success" text="Hoàn thành" />
+                    )}
+                  </Space>
+                }
+                style={{ borderRadius: 12, marginBottom: 16 }}
+                size="small"
+              >
+                <Space direction="vertical" style={{ width: "100%" }} size={12}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    Camera tự di chuyển qua các preset, chụp và nhận diện khuôn
+                    mặt tại mỗi vị trí.
+                  </Text>
+
+                  {/* Preset selector */}
+                  {allPresets.length > 0 && scanStatus?.state !== "scanning" && (
+                    <div>
+                      <Text
+                        type="secondary"
+                        style={{ fontSize: 11, marginBottom: 4, display: "block" }}
+                      >
+                        Chọn preset để quét (bỏ trống = quét tất cả):
+                      </Text>
+                      <Select
+                        mode="multiple"
+                        placeholder="Tất cả preset"
+                        style={{ width: "100%" }}
+                        value={scanPresetTokens}
+                        onChange={(vals: string[]) => setScanPresetTokens(vals)}
+                        options={allPresets.map((p) => ({
+                          value: p.token,
+                          label: p.name,
+                        }))}
+                        maxTagCount={3}
+                        allowClear
+                        size="small"
+                      />
+                    </div>
+                  )}
+
+                  {scanStatus?.state !== "scanning" ? (
+                    <Button
+                      type="primary"
+                      icon={<RadarChartOutlined />}
+                      block
+                      onClick={handleStartAutoScan}
+                      disabled={attendanceActive}
+                      style={{
+                        background:
+                          "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
+                        border: "none",
+                      }}
+                    >
+                      🔄 Bắt đầu quét tự động
+                    </Button>
+                  ) : (
+                    <Button
+                      danger
+                      icon={<PauseCircleOutlined />}
+                      block
+                      onClick={handleStopAutoScan}
+                    >
+                      Dừng quét
+                    </Button>
+                  )}
+
+                  {/* Scan Progress */}
+                  {scanStatus && scanStatus.state !== "idle" && (
+                    <div
+                      style={{
+                        background: "rgba(79, 70, 229, 0.05)",
+                        borderRadius: 8,
+                        padding: 12,
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          marginBottom: 8,
+                        }}
+                      >
+                        <Text style={{ fontSize: 12 }}>
+                          📍 {scanStatus.current_zone || "—"}
+                        </Text>
+                        <Text style={{ fontSize: 12 }}>
+                          Sweep {scanStatus.current_sweep}/{scanStatus.total_sweeps}
+                        </Text>
+                      </div>
+
+                      <Progress
+                        percent={
+                          scanStatus.zones_total > 0
+                            ? Math.round(
+                                ((scanStatus.current_sweep - 1) *
+                                  scanStatus.zones_total +
+                                  scanStatus.zones_done) *
+                                  100 /
+                                  (scanStatus.total_sweeps *
+                                    scanStatus.zones_total)
+                              )
+                            : 0
+                        }
+                        size="small"
+                        strokeColor={{
+                          "0%": "#667eea",
+                          "100%": "#764ba2",
+                        }}
+                      />
+
+                      <div
+                        style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          marginTop: 8,
+                          fontSize: 12,
+                        }}
+                      >
+                        <Text type="secondary">
+                          🎯 {scanStatus.recognized_count} SV nhận diện
+                        </Text>
+                        <Text
+                          style={{
+                            color:
+                              scanStatus.coverage_pct >= 90
+                                ? "#52c41a"
+                                : scanStatus.coverage_pct >= 50
+                                ? "#faad14"
+                                : "#ff4d4f",
+                            fontWeight: 600,
+                          }}
+                        >
+                          {scanStatus.coverage_pct}% coverage
+                        </Text>
+                      </div>
+
+                      <Text
+                        type="secondary"
+                        style={{ fontSize: 11, marginTop: 4, display: "block" }}
+                      >
+                        {scanStatus.frames_processed} frames đã xử lý
+                      </Text>
+                    </div>
+                  )}
+
+                  {/* Scan Results Table */}
+                  {scanStatus &&
+                    scanStatus.recognized &&
+                    scanStatus.recognized.length > 0 && (
+                      <Table
+                        dataSource={scanStatus.recognized}
+                        columns={[
+                          {
+                            title: "Tên",
+                            dataIndex: "full_name",
+                            key: "name",
+                            ellipsis: true,
+                          },
+                          {
+                            title: "Mã SV",
+                            dataIndex: "student_code",
+                            key: "code",
+                            width: 90,
+                          },
+                          {
+                            title: "Vị trí",
+                            dataIndex: "zone",
+                            key: "zone",
+                            width: 80,
+                            ellipsis: true,
+                          },
+                          {
+                            title: "Giờ",
+                            dataIndex: "time",
+                            key: "time",
+                            width: 70,
+                          },
+                        ]}
+                        rowKey="student_code"
+                        size="small"
+                        pagination={false}
+                        scroll={{ y: 200 }}
+                      />
+                    )}
+
+                  {scanStatus?.error && (
+                    <Text type="danger" style={{ fontSize: 12 }}>
+                      ❌ {scanStatus.error}
+                    </Text>
+                  )}
+                </Space>
+              </Card>
+            )}
           </Col>
         )}
       </Row>
