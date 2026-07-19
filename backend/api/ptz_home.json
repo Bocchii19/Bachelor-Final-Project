@@ -1,0 +1,11 @@
+{
+  "ptz": {
+    "home_set": true,
+    "pan": 0,
+    "tilt": 0,
+    "zoom": 0,
+    "home_pan": 0,
+    "home_tilt": 0,
+    "home_zoom": 0
+  }
+}

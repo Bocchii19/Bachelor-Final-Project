@@ -1,0 +1,11 @@
+services:
+  surveillance-system:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:9000/api}
+        VITE_WS_URL: ${VITE_WS_URL:-ws://localhost:9000/ws}
+    ports:
+      - "8080:8080"
+    restart: unless-stopped

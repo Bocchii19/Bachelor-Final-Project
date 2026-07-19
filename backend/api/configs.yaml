@@ -1,0 +1,113 @@
+Do_rac_trai_phep:
+  cameras: {}
+Do_xe_trai_phep:
+  cameras: {}
+Lan_chiem_via_he:
+  cameras: {}
+Treo_rao:
+  cameras:
+    Cam 1:
+      camera_id: Cam 1
+      image_size:
+        height: 1080
+        width: 1920
+      polygon:
+      - - 1905
+        - 651
+      - - 1526
+        - 551
+      - - 1070
+        - 469
+      - - 686
+        - 377
+      - - 394
+        - 339
+      - - 362
+        - 374
+      - - 736
+        - 474
+      - - 1401
+        - 651
+      - - 1900
+        - 795
+      rtsp_url: rtsp://admin:Hanet123@10.128.55.225:554/media/live/102
+      updated_at: '2026-04-28T17:19:35.424997Z'
+    Cam 2:
+      camera_id: Cam 2
+      image_size:
+        height: 1080
+        width: 1920
+      polygon:
+      - - 1903
+        - 569
+      - - 1661
+        - 519
+      - - 1414
+        - 456
+      - - 1042
+        - 374
+      - - 830
+        - 352
+      - - 416
+        - 269
+      - - 332
+        - 274
+      - - 284
+        - 274
+      - - 242
+        - 297
+      - - 613
+        - 384
+      - - 1065
+        - 479
+      - - 1900
+        - 683
+      rtsp_url: rtsp://admin:Hanet123@10.128.55.222:554/media/live/102
+      updated_at: '2026-04-28T17:19:55.495790Z'
+    Cam 3:
+      camera_id: Cam 3
+      image_size:
+        height: 1080
+        width: 1920
+      polygon:
+      - - 1913
+        - 711
+      - - 1416
+        - 556
+      - - 865
+        - 401
+      - - 476
+        - 302
+      - - 406
+        - 284
+      - - 359
+        - 319
+      - - 1192
+        - 596
+      - - 1908
+        - 843
+      rtsp_url: rtsp://admin:Hanet123@10.128.55.223:554/media/live/102
+      updated_at: '2026-04-28T17:20:11.375051Z'
+    Fence 8:
+      camera_id: Fence 8
+      image_size:
+        height: 1080
+        width: 1920
+      polygon:
+      - - 400
+        - 301
+      - - 861
+        - 338
+      - - 1400
+        - 425
+      - - 1885
+        - 551
+      - - 1895
+        - 796
+      - - 890
+        - 522
+      - - 259
+        - 347
+      rtsp_url: rtsp://admin:Hanet123@10.128.55.225:554/media/live/105
+      updated_at: '2026-05-09T06:41:40.300099Z'
+  schedule: 09:00 - 21:00

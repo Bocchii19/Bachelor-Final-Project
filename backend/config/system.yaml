@@ -1,0 +1,133 @@
+# UBQN Settings
+# Override default values in src/backend/core/config.py
+
+model:
+  name: best_UBQN_V5
+  # Hardcode model path — set bất kỳ model nào cũng chạy được
+  # Nếu để trống hoặc xóa dòng này, sẽ tự tìm theo name ở trên
+  model_path: src/backend/models/v5/best_UBQN_V5.onnx
+  default_imgsz: 640
+  default_conf: 0.5
+
+cameras:
+  # serial: H07CEECV209325700140
+  - id: fence7
+    rtsp_url: rtsp://admin:Hanet123@10.128.55.202:554/media/live/105
+    display_url: rtsp://admin:Hanet123@10.128.55.202:554/media/live/102
+
+  # serial: H07CEECV209325700084
+  - id: fence8
+    rtsp_url: rtsp://admin:Hanet123@10.128.55.225:554/media/live/105
+    display_url: rtsp://admin:Hanet123@10.128.55.225:554/media/live/102
+
+  # serial: H07CEECV209325700085
+  - id: fence9
+    rtsp_url: rtsp://admin:Hanet123@10.128.55.222:554/media/live/105
+    display_url: rtsp://admin:Hanet123@10.128.55.222:554/media/live/102
+
+  # serial: H07CEECV209325700160
+  - id: fence10
+    rtsp_url: rtsp://admin:Hanet123@10.128.55.223:554/media/live/105
+    display_url: rtsp://admin:Hanet123@10.128.55.223:554/media/live/102
+
+gstreamer:
+  latency: 300
+  max_buffers: 3
+  validate_seconds: 5.0
+  validate_reads: 30
+  enable_udp_fallback: false
+  enable_h265_fallback: false
+
+paths:
+  results_dir: results
+  configs_yaml: src/backend/api/configs.yaml
+
+# ==============================================================
+# Fence Module — Config riêng cho bài toán phát hiện trèo rào
+# ==============================================================
+# Polygon areas nằm trong config/polygon.yaml (dùng chung)
+# File này chỉ chứa: PTZ patrol, thresholds, detection params
+# ==============================================================
+
+# ── PTZ Camera ──────────────────────────────────────────────────
+ptz_camera:
+  ip: "10.128.55.237"
+  port: 80
+  username: "admin"
+  password: "Hanet123"
+  rtsp_url: "rtsp://admin:Hanet123@10.128.55.237:554/media/live/105"
+  device_name: "H074EHCV209525700047_PTZ 4"
+
+# ── Preset Mapping: PTZ preset ID → fixed camera ───────────────
+# enabled: false để tắt preset tạm thời
+# conf: confidence threshold riêng cho camera (override global)
+presets:
+  - id: 253
+    name: fence8
+    settle_time: 2
+    fixed_camera_id: fence8
+    device_name: "H07CEECV209325700084_fence8"
+    conf: 0.6
+  - id: 254
+    name: fence9
+    settle_time: 3.5
+    fixed_camera_id: fence9
+    device_name: "H07CEECV209325700085_fence9"
+    conf: 0.6
+  - id: 3
+    name: fence10
+    enabled: false
+    settle_time: 3.5
+    fixed_camera_id: fence10
+    device_name: "H07CEECV209325700160_fence10"
+    conf: 0.6
+  - id: 4
+    name: fence7
+    enabled: false
+    settle_time: 2
+    fixed_camera_id: fence7
+    device_name: "H07CEECV209325700140_fence7"
+    conf: 0.6
+    webhook: false
+
+# ── Patrol Parameters ──────────────────────────────────────────
+patrol:
+  cooldown: 20.0           # Giây chờ sau trigger trước khi trigger lại
+  dwell_time: 1.0          # Giây giám sát mỗi preset
+
+# ── Detection (dùng model treo_rao hiện có) ────────────────────
+detection:
+  confidence_threshold: 0.45  # Default, bị override bởi presets[].conf
+  device: "0"
+  imgsz: 640
+
+# ── Region2 Schedule — bật detect vùng region2 theo giờ ────────
+# Ban ngày: chỉ detect bằng mask (region1) + fence line
+# Ban đêm: detect thêm cả vùng region2 (bên trong hàng rào)
+region2_schedule:
+  enabled: true
+  time_ranges:
+    - start: "19:00"        # Bắt đầu ON region2
+      end: "8:00"          # Kết thúc
+
+# ── Zoom & Center — khi PTZ đã detect person ──────────────────
+zoom_track:
+  target_bbox_ratio: 0.40   # bbox_height / frame_height >= 40% thì dừng zoom
+  max_zoom_steps: 25       # Số lần zoom tối đa
+  zoom_step: 6             # Tốc độ zoom MTRPC [1-8] (max speed)
+  zoom_duration: 0.5       # Giây mỗi lần zoom
+  center_tolerance: 0.12   # Sai lệch tâm cho phép (% frame) = deadband PID
+  disable_tracking: false  # (chỉ áp dụng control_mode=step) false = center lại mỗi step zoom
+
+  # ── Điều khiển vòng kín (1a) ──
+  control_mode: pid        # pid = PID + bám track-ID ổn định | step = stepping cũ (để so sánh)
+  pid_settle: 0.35         # Giây chờ camera ổn định giữa các vòng điều khiển
+  pid:
+    pan:  { kp: 2.2, ki: 0.0, kd: 0.4 }
+    tilt: { kp: 2.2, ki: 0.0, kd: 0.4 }
+    zoom: { kp: 2.0, ki: 0.0, kd: 0.0 }
+
+# ── Face Recognition — InsightFace ─────────────────────────────
+face_recognition:
+  save_dir: "results/captures"
+  min_face_size: 50

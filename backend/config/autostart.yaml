@@ -1,0 +1,26 @@
+# ── UBQN Auto-Start Configuration ──────────────────────────────
+# Khi service khởi động, AI nào có enabled: true sẽ tự động bật.
+# Vẫn có thể start/stop thủ công từ Web UI bất cứ lúc nào.
+#
+# Các tùy chọn mỗi AI feature:
+#   enabled: true/false   → Có tự động bật khi service start không
+#   no_ptz: true/false    → Chỉ dành cho fenceClimb: tắt PTZ patrol
+#   delay: <seconds>      → Delay trước khi bật (chờ hệ thống sẵn sàng)
+# ────────────────────────────────────────────────────────────────
+
+ai_cores:
+  fenceClimb:
+    enabled: true          # Tự bật fence detection khi khởi động
+    no_ptz: false          # true = chạy detect nhưng không dùng PTZ
+    delay: 10              # Chờ 10s sau khi backend ready mới bật AI
+
+  # Các AI khác (mở rộng sau)
+  # lanChiem:
+  #   enabled: false
+  #   delay: 15
+  # doXe:
+  #   enabled: false
+  #   delay: 15
+  # doRac:
+  #   enabled: false
+  #   delay: 15
